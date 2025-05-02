@@ -2,27 +2,99 @@ name: kyc-lga-crawler-pipeline
 
 on:
   workflow_dispatch:
+    inputs:
+      pattern:
+        description: 'NIC pattern (e.g., "1990{0}V")'
+        required: false
+        default: '1990{0}V'
+      start:
+        description: 'Starting number'
+        required: false
+        default: '1'
+      count:
+        description: 'Number of NICs to crawl'
+        required: false
+        default: '100'
+      concurrency:
+        description: 'Concurrency limit'
+        required: false
+        default: '2'
   schedule:
-    - cron: '0 2 * * 0'
+    - cron: '0 2 * * 0'  # Run every Sunday at 2 AM
 
 jobs:
-  build-and-crawl:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          
+      - name: Run tests
+        run: |
+          pytest tests/ --cov=. --cov-report=xml
+          
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          
+  build-and-crawl:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
       - uses: docker/setup-buildx-action@v3
-
+      
+      - name: Cache Docker layers
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+            
       - name: Build Docker image
-        run: docker build -t kyc-lga-crawler .
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: kyc-lga-crawler:latest
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
       - name: Run crawler
-        run: docker run --rm -v ${{ github.workspace }}:/app kyc-lga-crawler
+        run: |
+          mkdir -p output
+          docker run --rm \
+            -v ${{ github.workspace }}/output:/app/output \
+            -e PATTERN=${{ github.event.inputs.pattern || '1990{0}V' }} \
+            -e START=${{ github.event.inputs.start || '1' }} \
+            -e COUNT=${{ github.event.inputs.count || '100' }} \
+            -e CONCURRENCY=${{ github.event.inputs.concurrency || '2' }} \
+            -e RESPECT_ROBOTS_TXT=true \
+            kyc-lga-crawler:latest
 
       - name: Upload data artifacts
         uses: actions/upload-artifact@v4
         with:
           name: kyc-lga-output
           path: |
-            kyc_lga_all_data.json
-            kyc_lga_backup.pkl
-            crawler.log
+            output/kyc_lga_all_data.json
+            output/kyc_lga_backup.pkl
+            output/crawler.log
+            output/crawl_errors.json
